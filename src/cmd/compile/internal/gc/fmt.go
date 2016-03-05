@@ -749,7 +749,13 @@ func typefmt(t *Type, flag int) string {
 		if name != "" {
 			str = name + " " + typ
 		}
-		if flag&obj.FmtShort == 0 && !fmtbody && t.Note != nil {
+
+		// The fmtbody flag is intended to suppress escape analysis annotations
+		// when printing a function type used in a function body.
+		// (The escape analysis tags do not apply to func vars.)
+		// But it must not suppress struct field tags.
+		// See golang.org/issue/13777 and golang.org/issue/14331.
+		if flag&obj.FmtShort == 0 && (!fmtbody || !t.Funarg) && t.Note != nil {
 			str += " " + strconv.Quote(*t.Note)
 		}
 		return str
@@ -1537,7 +1543,7 @@ func nodedump(n *Node, flag int) string {
 		} else {
 			fmt.Fprintf(&buf, "%v%v", Oconv(int(n.Op), 0), Jconv(n, 0))
 		}
-		if recur && n.Type == nil && n.Name.Param.Ntype != nil {
+		if recur && n.Type == nil && n.Name != nil && n.Name.Param != nil && n.Name.Param.Ntype != nil {
 			indent(&buf)
 			fmt.Fprintf(&buf, "%v-ntype%v", Oconv(int(n.Op), 0), n.Name.Param.Ntype)
 		}
@@ -1724,8 +1730,40 @@ func Hconv(l *NodeList, flag int) string {
 	return buf.String()
 }
 
+func Hconvslice(l []*Node, flag int) string {
+	if len(l) == 0 && fmtmode == FDbg {
+		return "<nil>"
+	}
+
+	sf := flag
+	sm, sb := setfmode(&flag)
+	sep := "; "
+	if fmtmode == FDbg {
+		sep = "\n"
+	} else if flag&obj.FmtComma != 0 {
+		sep = ", "
+	}
+
+	var buf bytes.Buffer
+	for i, n := range l {
+		buf.WriteString(Nconv(n, 0))
+		if i+1 < len(l) {
+			buf.WriteString(sep)
+		}
+	}
+
+	flag = sf
+	fmtbody = sb
+	fmtmode = sm
+	return buf.String()
+}
+
 func dumplist(s string, l *NodeList) {
 	fmt.Printf("%s%v\n", s, Hconv(l, obj.FmtSign))
+}
+
+func dumpslice(s string, l []*Node) {
+	fmt.Printf("%s%v\n", s, Hconvslice(l, obj.FmtSign))
 }
 
 func Dump(s string, n *Node) {

@@ -4,12 +4,16 @@
 
 package ssa
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // A Func represents a Go func declaration (or function literal) and
 // its body.  This package compiles each Func independently.
 type Func struct {
 	Config     *Config     // architecture information
+	pass       *pass       // current pass information (name, options, etc.)
 	Name       string      // e.g. bytes·Compare
 	Type       Type        // type signature of the function.
 	StaticData interface{} // associated static data, untouched by the ssa package
@@ -31,6 +35,8 @@ type Func struct {
 
 	freeValues *Value // free Values linked by argstorage[0].  All other fields except ID are 0/nil.
 	freeBlocks *Block // free Blocks linked by succstorage[0].  All other fields except ID are 0/nil.
+
+	constants map[int64][]*Value // constants cache, keyed by constant value; users must check value's Op and Type
 }
 
 // NumBlocks returns an integer larger than the id of any Block in the Func.
@@ -87,6 +93,20 @@ func (f *Func) newValue(op Op, t Type, b *Block, line int32) *Value {
 	v.Line = line
 	b.Values = append(b.Values, v)
 	return v
+}
+
+// logPassStat writes a string key and int value as a warning in a
+// tab-separated format easily handled by spreadsheets or awk.
+// file names, lines, and function names are included to provide enough (?)
+// context to allow item-by-item comparisons across runs.
+// For example:
+// awk 'BEGIN {FS="\t"} $3~/TIME/{sum+=$4} END{print "t(ns)=",sum}' t.log
+func (f *Func) logStat(key string, args ...interface{}) {
+	value := ""
+	for _, a := range args {
+		value += fmt.Sprintf("\t%v", a)
+	}
+	f.Config.Warnl(int(f.Entry.Line), "\t%s\t%s%s\t%s", f.pass.name, key, value, f.Name)
 }
 
 // freeValue frees a value.  It must no longer be referenced.
@@ -252,38 +272,47 @@ func (b *Block) NewValue3I(line int32, op Op, t Type, auxint int64, arg0, arg1, 
 	return v
 }
 
+// constVal returns a constant value for c.
+func (f *Func) constVal(line int32, op Op, t Type, c int64) *Value {
+	if f.constants == nil {
+		f.constants = make(map[int64][]*Value)
+	}
+	vv := f.constants[c]
+	for _, v := range vv {
+		if v.Op == op && v.Type.Equal(t) {
+			return v
+		}
+	}
+	v := f.Entry.NewValue0I(line, op, t, c)
+	f.constants[c] = append(vv, v)
+	return v
+}
+
 // ConstInt returns an int constant representing its argument.
 func (f *Func) ConstBool(line int32, t Type, c bool) *Value {
-	// TODO: cache?
 	i := int64(0)
 	if c {
 		i = 1
 	}
-	return f.Entry.NewValue0I(line, OpConstBool, t, i)
+	return f.constVal(line, OpConstBool, t, i)
 }
 func (f *Func) ConstInt8(line int32, t Type, c int8) *Value {
-	// TODO: cache?
-	return f.Entry.NewValue0I(line, OpConst8, t, int64(c))
+	return f.constVal(line, OpConst8, t, int64(c))
 }
 func (f *Func) ConstInt16(line int32, t Type, c int16) *Value {
-	// TODO: cache?
-	return f.Entry.NewValue0I(line, OpConst16, t, int64(c))
+	return f.constVal(line, OpConst16, t, int64(c))
 }
 func (f *Func) ConstInt32(line int32, t Type, c int32) *Value {
-	// TODO: cache?
-	return f.Entry.NewValue0I(line, OpConst32, t, int64(c))
+	return f.constVal(line, OpConst32, t, int64(c))
 }
 func (f *Func) ConstInt64(line int32, t Type, c int64) *Value {
-	// TODO: cache?
-	return f.Entry.NewValue0I(line, OpConst64, t, c)
+	return f.constVal(line, OpConst64, t, c)
 }
 func (f *Func) ConstFloat32(line int32, t Type, c float64) *Value {
-	// TODO: cache?
-	return f.Entry.NewValue0I(line, OpConst32F, t, int64(math.Float64bits(c)))
+	return f.constVal(line, OpConst32F, t, int64(math.Float64bits(c)))
 }
 func (f *Func) ConstFloat64(line int32, t Type, c float64) *Value {
-	// TODO: cache?
-	return f.Entry.NewValue0I(line, OpConst64F, t, int64(math.Float64bits(c)))
+	return f.constVal(line, OpConst64F, t, int64(math.Float64bits(c)))
 }
 
 func (f *Func) Logf(msg string, args ...interface{})   { f.Config.Logf(msg, args...) }

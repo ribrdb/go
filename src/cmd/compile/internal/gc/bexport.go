@@ -72,7 +72,7 @@ amount of space to hold the list without the need to grow it later.
 
 All integer values use a variable-length encoding for compact representation.
 
-If debugFormat is set, each integer and string value is preceeded by a marker
+If debugFormat is set, each integer and string value is preceded by a marker
 and position information in the encoding. This mechanism permits an importer
 to recognize immediately when it is out of sync. The importer recognizes this
 mode automatically (i.e., it can import export data produced with debugging
@@ -877,7 +877,7 @@ func (p *exporter) byte(b byte) {
 // tracef is like fmt.Printf but it rewrites the format string
 // to take care of indentation.
 func (p *exporter) tracef(format string, args ...interface{}) {
-	if strings.IndexAny(format, "<>\n") >= 0 {
+	if strings.ContainsAny(format, "<>\n") {
 		var buf bytes.Buffer
 		for i := 0; i < len(format); i++ {
 			// no need to deal with runes
@@ -1035,6 +1035,9 @@ func predeclared() []*Type {
 
 			// package unsafe
 			Types[TUNSAFEPTR],
+
+			// any type, for builtin export data
+			Types[TANY],
 		}
 	}
 	return predecl

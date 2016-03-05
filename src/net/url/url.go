@@ -307,14 +307,15 @@ func escape(s string, mode encoding) string {
 // construct a URL struct directly and set the Opaque field instead of Path.
 // These still work as well.
 type URL struct {
-	Scheme   string
-	Opaque   string    // encoded opaque data
-	User     *Userinfo // username and password information
-	Host     string    // host or host:port
-	Path     string
-	RawPath  string // encoded path hint (Go 1.5 and later only; see EscapedPath method)
-	RawQuery string // encoded query values, without '?'
-	Fragment string // fragment for references, without '#'
+	Scheme     string
+	Opaque     string    // encoded opaque data
+	User       *Userinfo // username and password information
+	Host       string    // host or host:port
+	Path       string
+	RawPath    string // encoded path hint (Go 1.5 and later only; see EscapedPath method)
+	ForceQuery bool   // append a query ('?') even if RawQuery is empty
+	RawQuery   string // encoded query values, without '?'
+	Fragment   string // fragment for references, without '#'
 }
 
 // User returns a Userinfo containing the provided username
@@ -459,7 +460,12 @@ func parse(rawurl string, viaRequest bool) (url *URL, err error) {
 	}
 	url.Scheme = strings.ToLower(url.Scheme)
 
-	rest, url.RawQuery = split(rest, "?", true)
+	if strings.HasSuffix(rest, "?") {
+		url.ForceQuery = true
+		rest = rest[:len(rest)-1]
+	} else {
+		rest, url.RawQuery = split(rest, "?", true)
+	}
 
 	if !strings.HasPrefix(rest, "/") {
 		if url.Scheme != "" {
@@ -511,7 +517,7 @@ func parseAuthority(authority string) (user *Userinfo, host string, err error) {
 		return nil, host, nil
 	}
 	userinfo := authority[:i]
-	if strings.Index(userinfo, ":") < 0 {
+	if !strings.Contains(userinfo, ":") {
 		if userinfo, err = unescape(userinfo, encodeUserPassword); err != nil {
 			return nil, "", err
 		}
@@ -684,7 +690,7 @@ func (u *URL) String() string {
 		}
 		buf.WriteString(path)
 	}
-	if u.RawQuery != "" {
+	if u.ForceQuery || u.RawQuery != "" {
 		buf.WriteByte('?')
 		buf.WriteString(u.RawQuery)
 	}
@@ -709,8 +715,8 @@ func (v Values) Get(key string) string {
 	if v == nil {
 		return ""
 	}
-	vs, ok := v[key]
-	if !ok || len(vs) == 0 {
+	vs := v[key]
+	if len(vs) == 0 {
 		return ""
 	}
 	return vs[0]
@@ -913,7 +919,7 @@ func (u *URL) RequestURI() string {
 			result = u.Scheme + ":" + result
 		}
 	}
-	if u.RawQuery != "" {
+	if u.ForceQuery || u.RawQuery != "" {
 		result += "?" + u.RawQuery
 	}
 	return result

@@ -962,7 +962,7 @@ func defgotype(gotype *LSym) *LSym {
 	}
 
 	if !strings.HasPrefix(gotype.Name, "type.") {
-		Diag("dwarf: type name doesn't start with \".type\": %s", gotype.Name)
+		Diag("dwarf: type name doesn't start with \"type.\": %s", gotype.Name)
 		return mustFind("<unspecified>")
 	}
 
@@ -1923,7 +1923,9 @@ func writepub(sname string, ispub func(*DWDie) bool, prev *LSym) *LSym {
  */
 func writearanges(prev *LSym) *LSym {
 	s := Linklookup(Ctxt, "go.dwarf.aranges", 0)
-	headersize := int(Rnd(4+2+4+1+1, int64(Thearch.Ptrsize))) // don't count unit_length field itself
+	// The first tuple is aligned to a multiple of the size of a single tuple
+	// (twice the size of an address)
+	headersize := int(Rnd(4+2+4+1+1, int64(Thearch.Ptrsize*2))) // don't count unit_length field itself
 
 	for compunit := dwroot.child; compunit != nil; compunit = compunit.link {
 		b := getattr(compunit, DW_AT_low_pc)

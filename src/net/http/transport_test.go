@@ -853,7 +853,7 @@ func TestTransportExpect100Continue(t *testing.T) {
 		{path: "/100", body: []byte("hello"), sent: 5, status: 200},       // Got 100 followed by 200, entire body is sent.
 		{path: "/200", body: []byte("hello"), sent: 0, status: 200},       // Got 200 without 100. body isn't sent.
 		{path: "/500", body: []byte("hello"), sent: 0, status: 500},       // Got 500 without 100. body isn't sent.
-		{path: "/keepalive", body: []byte("hello"), sent: 0, status: 500}, // Althogh without Connection:close, body isn't sent.
+		{path: "/keepalive", body: []byte("hello"), sent: 0, status: 500}, // Although without Connection:close, body isn't sent.
 		{path: "/timeout", body: []byte("hello"), sent: 5, status: 200},   // Timeout exceeded and entire body is sent.
 	}
 
@@ -2885,23 +2885,39 @@ func TestTransportPrefersResponseOverWriteError(t *testing.T) {
 }
 
 func TestTransportAutomaticHTTP2(t *testing.T) {
-	tr := &Transport{}
+	testTransportAutoHTTP(t, &Transport{}, true)
+}
+
+// golang.org/issue/14391: also check DefaultTransport
+func TestTransportAutomaticHTTP2_DefaultTransport(t *testing.T) {
+	testTransportAutoHTTP(t, DefaultTransport.(*Transport), true)
+}
+
+func TestTransportAutomaticHTTP2_TLSNextProto(t *testing.T) {
+	testTransportAutoHTTP(t, &Transport{
+		TLSNextProto: make(map[string]func(string, *tls.Conn) RoundTripper),
+	}, false)
+}
+
+func TestTransportAutomaticHTTP2_TLSConfig(t *testing.T) {
+	testTransportAutoHTTP(t, &Transport{
+		TLSClientConfig: new(tls.Config),
+	}, false)
+}
+
+func TestTransportAutomaticHTTP2_ExpectContinueTimeout(t *testing.T) {
+	testTransportAutoHTTP(t, &Transport{
+		ExpectContinueTimeout: 1 * time.Second,
+	}, false)
+}
+
+func testTransportAutoHTTP(t *testing.T, tr *Transport, wantH2 bool) {
 	_, err := tr.RoundTrip(new(Request))
 	if err == nil {
 		t.Error("expected error from RoundTrip")
 	}
-	if tr.TLSNextProto["h2"] == nil {
-		t.Errorf("HTTP/2 not registered.")
-	}
-
-	// Now with TLSNextProto set:
-	tr = &Transport{TLSNextProto: make(map[string]func(string, *tls.Conn) RoundTripper)}
-	_, err = tr.RoundTrip(new(Request))
-	if err == nil {
-		t.Error("expected error from RoundTrip")
-	}
-	if tr.TLSNextProto["h2"] != nil {
-		t.Errorf("HTTP/2 registered, despite non-nil TLSNextProto field")
+	if reg := tr.TLSNextProto["h2"] != nil; reg != wantH2 {
+		t.Errorf("HTTP/2 registered = %v; want %v", reg, wantH2)
 	}
 }
 

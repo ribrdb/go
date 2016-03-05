@@ -6,7 +6,6 @@ package gc
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"fmt"
 	"html"
 	"math"
@@ -23,6 +22,15 @@ const minZeroPage = 4096
 
 var ssaConfig *ssa.Config
 var ssaExp ssaExport
+
+func initssa() *ssa.Config {
+	ssaExp.unimplemented = false
+	ssaExp.mustImplement = true
+	if ssaConfig == nil {
+		ssaConfig = ssa.NewConfig(Thearch.Thestring, &ssaExp, Ctxt, Debug['N'] == 0)
+	}
+	return ssaConfig
+}
 
 func shouldssa(fn *Node) bool {
 	if Thearch.Thestring != "amd64" {
@@ -67,42 +75,7 @@ func shouldssa(fn *Node) bool {
 		return localpkg.Name == pkg
 	}
 
-	gossahash := os.Getenv("GOSSAHASH")
-	if gossahash == "" || gossahash == "y" || gossahash == "Y" {
-		return true
-	}
-	if gossahash == "n" || gossahash == "N" {
-		return false
-	}
-
-	// Check the hash of the name against a partial input hash.
-	// We use this feature to do a binary search within a package to
-	// find a function that is incorrectly compiled.
-	hstr := ""
-	for _, b := range sha1.Sum([]byte(name)) {
-		hstr += fmt.Sprintf("%08b", b)
-	}
-
-	if strings.HasSuffix(hstr, gossahash) {
-		fmt.Printf("GOSSAHASH triggered %s\n", name)
-		return true
-	}
-
-	// Iteratively try additional hashes to allow tests for multi-point
-	// failure.
-	for i := 0; true; i++ {
-		ev := fmt.Sprintf("GOSSAHASH%d", i)
-		evv := os.Getenv(ev)
-		if evv == "" {
-			break
-		}
-		if strings.HasSuffix(hstr, evv) {
-			fmt.Printf("%s triggered %s\n", ev, name)
-			return true
-		}
-	}
-
-	return false
+	return initssa().DebugHashMatch("GOSSAHASH", name)
 }
 
 // buildssa builds an SSA function.
@@ -111,24 +84,23 @@ func buildssa(fn *Node) *ssa.Func {
 	printssa := strings.HasSuffix(name, "_ssa") || strings.Contains(name, "_ssa.") || name == os.Getenv("GOSSAFUNC")
 	if printssa {
 		fmt.Println("generating SSA for", name)
-		dumplist("buildssa-enter", fn.Func.Enter)
+		dumpslice("buildssa-enter", fn.Func.Enter.Slice())
 		dumplist("buildssa-body", fn.Nbody)
-		dumplist("buildssa-exit", fn.Func.Exit)
+		dumpslice("buildssa-exit", fn.Func.Exit.Slice())
 	}
 
 	var s state
 	s.pushLine(fn.Lineno)
 	defer s.popLine()
 
+	if fn.Func.Pragma&CgoUnsafeArgs != 0 {
+		s.cgoUnsafeArgs = true
+	}
 	// TODO(khr): build config just once at the start of the compiler binary
 
 	ssaExp.log = printssa
-	ssaExp.unimplemented = false
-	ssaExp.mustImplement = true
-	if ssaConfig == nil {
-		ssaConfig = ssa.NewConfig(Thearch.Thestring, &ssaExp, Ctxt, Debug['N'] == 0)
-	}
-	s.config = ssaConfig
+
+	s.config = initssa()
 	s.f = s.config.NewFunc()
 	s.f.Name = name
 	s.exitCode = fn.Func.Exit
@@ -163,19 +135,24 @@ func buildssa(fn *Node) *ssa.Func {
 
 	// Generate addresses of local declarations
 	s.decladdrs = map[*Node]*ssa.Value{}
-	for d := fn.Func.Dcl; d != nil; d = d.Next {
-		n := d.N
+	for _, n := range fn.Func.Dcl {
 		switch n.Class {
-		case PPARAM:
+		case PPARAM, PPARAMOUT:
 			aux := s.lookupSymbol(n, &ssa.ArgSymbol{Typ: n.Type, Node: n})
 			s.decladdrs[n] = s.entryNewValue1A(ssa.OpAddr, Ptrto(n.Type), aux, s.sp)
+			if n.Class == PPARAMOUT && s.canSSA(n) {
+				// Save ssa-able PPARAMOUT variables so we can
+				// store them back to the stack at the end of
+				// the function.
+				s.returns = append(s.returns, n)
+			}
 		case PAUTO | PHEAP:
 			// TODO this looks wrong for PAUTO|PHEAP, no vardef, but also no definition
 			aux := s.lookupSymbol(n, &ssa.AutoSymbol{Typ: n.Type, Node: n})
 			s.decladdrs[n] = s.entryNewValue1A(ssa.OpAddr, Ptrto(n.Type), aux, s.sp)
 		case PPARAM | PHEAP, PPARAMOUT | PHEAP:
 		// This ends up wrong, have to do it at the PARAM node instead.
-		case PAUTO, PPARAMOUT:
+		case PAUTO:
 			// processed at each use, to prevent Addr coming
 			// before the decl.
 		case PFUNC:
@@ -190,12 +167,12 @@ func buildssa(fn *Node) *ssa.Func {
 	}
 
 	// Convert the AST-based IR to the SSA-based IR
-	s.stmtList(fn.Func.Enter)
+	s.stmts(fn.Func.Enter)
 	s.stmtList(fn.Nbody)
 
 	// fallthrough to exit
 	if s.curBlock != nil {
-		s.stmtList(s.exitCode)
+		s.stmts(s.exitCode)
 		m := s.mem()
 		b := s.endBlock()
 		b.Kind = ssa.BlockRet
@@ -232,7 +209,7 @@ func buildssa(fn *Node) *ssa.Func {
 	s.linkForwardReferences()
 
 	// Don't carry reference this around longer than necessary
-	s.exitCode = nil
+	s.exitCode = Nodes{}
 
 	// Main call to ssa package to compile function
 	ssa.Compile(s.f)
@@ -255,7 +232,7 @@ type state struct {
 	fwdGotos []*Node
 	// Code that must precede any return
 	// (e.g., copying value of heap-escaped paramout back to true paramout)
-	exitCode *NodeList
+	exitCode Nodes
 
 	// unlabeled break and continue statement tracking
 	breakTo    *ssa.Block // current target for plain break statement
@@ -291,6 +268,11 @@ type state struct {
 
 	// list of FwdRef values.
 	fwdRefs []*ssa.Value
+
+	// list of PPARAMOUT (return) variables.  Does not include PPARAM|PHEAP vars.
+	returns []*Node
+
+	cgoUnsafeArgs bool
 }
 
 type funcLine struct {
@@ -510,6 +492,12 @@ func (s *state) constInt(t ssa.Type, c int64) *ssa.Value {
 	return s.constInt32(t, int32(c))
 }
 
+func (s *state) stmts(a Nodes) {
+	for _, x := range a.Slice() {
+		s.stmt(x)
+	}
+}
+
 // ssaStmtList converts the statement n to SSA and adds it to s.
 func (s *state) stmtList(l *NodeList) {
 	for ; l != nil; l = l.Next {
@@ -544,8 +532,9 @@ func (s *state) stmt(n *Node) {
 	// Expression statements
 	case OCALLFUNC, OCALLMETH, OCALLINTER:
 		s.call(n, callNormal)
-		if n.Op == OCALLFUNC && n.Left.Op == ONAME && n.Left.Class == PFUNC && n.Left.Sym.Pkg == Runtimepkg &&
-			(n.Left.Sym.Name == "gopanic" || n.Left.Sym.Name == "selectgo") {
+		if n.Op == OCALLFUNC && n.Left.Op == ONAME && n.Left.Class == PFUNC &&
+			(compiling_runtime != 0 && n.Left.Sym.Name == "throw" ||
+				n.Left.Sym.Pkg == Runtimepkg && (n.Left.Sym.Name == "gopanic" || n.Left.Sym.Name == "selectgo" || n.Left.Sym.Name == "block")) {
 			m := s.mem()
 			b := s.endBlock()
 			b.Kind = ssa.BlockExit
@@ -561,7 +550,7 @@ func (s *state) stmt(n *Node) {
 
 	case OAS2DOTTYPE:
 		res, resok := s.dottype(n.Rlist.N, true)
-		s.assign(n.List.N, res, false, false, n.Lineno)
+		s.assign(n.List.N, res, needwritebarrier(n.List.N, n.Rlist.N), false, n.Lineno)
 		s.assign(n.List.Next.N, resok, false, false, n.Lineno)
 		return
 
@@ -727,19 +716,12 @@ func (s *state) stmt(n *Node) {
 
 	case ORETURN:
 		s.stmtList(n.List)
-		s.stmtList(s.exitCode)
-		m := s.mem()
-		b := s.endBlock()
-		b.Kind = ssa.BlockRet
-		b.Control = m
+		s.exit()
 	case ORETJMP:
 		s.stmtList(n.List)
-		s.stmtList(s.exitCode)
-		m := s.mem()
-		b := s.endBlock()
-		b.Kind = ssa.BlockRetJmp
+		b := s.exit()
+		b.Kind = ssa.BlockRetJmp // override BlockRet
 		b.Aux = n.Left.Sym
-		b.Control = m
 
 	case OCONTINUE, OBREAK:
 		var op string
@@ -888,7 +870,7 @@ func (s *state) stmt(n *Node) {
 		// We only care about liveness info at call sites, so putting the
 		// varkill in the store chain is enough to keep it correctly ordered
 		// with respect to call ops.
-		if !canSSA(n.Left) {
+		if !s.canSSA(n.Left) {
 			s.vars[&memVar] = s.newValue1A(ssa.OpVarKill, ssa.TypeMem, n.Left, s.mem())
 		}
 
@@ -906,6 +888,34 @@ func (s *state) stmt(n *Node) {
 	default:
 		s.Unimplementedf("unhandled stmt %s", opnames[n.Op])
 	}
+}
+
+// exit processes any code that needs to be generated just before returning.
+// It returns a BlockRet block that ends the control flow.  Its control value
+// will be set to the final memory state.
+func (s *state) exit() *ssa.Block {
+	// Run exit code.  Typically, this code copies heap-allocated PPARAMOUT
+	// variables back to the stack.
+	s.stmts(s.exitCode)
+
+	// Store SSAable PPARAMOUT variables back to stack locations.
+	for _, n := range s.returns {
+		aux := &ssa.ArgSymbol{Typ: n.Type, Node: n}
+		addr := s.newValue1A(ssa.OpAddr, Ptrto(n.Type), aux, s.sp)
+		val := s.variable(n, n.Type)
+		s.vars[&memVar] = s.newValue1A(ssa.OpVarDef, ssa.TypeMem, n, s.mem())
+		s.vars[&memVar] = s.newValue3I(ssa.OpStore, ssa.TypeMem, n.Type.Size(), addr, val, s.mem())
+		// TODO: if val is ever spilled, we'd like to use the
+		// PPARAMOUT slot for spilling it.  That won't happen
+		// currently.
+	}
+
+	// Do actual return.
+	m := s.mem()
+	b := s.endBlock()
+	b.Kind = ssa.BlockRet
+	b.Control = m
+	return b
 }
 
 type opAndType struct {
@@ -1342,7 +1352,7 @@ func (s *state) expr(n *Node) *ssa.Value {
 			aux := &ssa.ExternSymbol{n.Type, sym}
 			return s.entryNewValue1A(ssa.OpAddr, Ptrto(n.Type), aux, s.sb)
 		}
-		if canSSA(n) {
+		if s.canSSA(n) {
 			return s.variable(n, n.Type)
 		}
 		addr := s.addr(n, false)
@@ -2137,7 +2147,7 @@ func (s *state) assign(left *Node, right *ssa.Value, wb, deref bool, line int32)
 	}
 	t := left.Type
 	dowidth(t)
-	if canSSA(left) {
+	if s.canSSA(left) {
 		if deref {
 			s.Fatalf("can SSA LHS %s but not RHS %s", left, right)
 		}
@@ -2545,7 +2555,7 @@ func (s *state) addr(n *Node, bounded bool) *ssa.Value {
 
 // canSSA reports whether n is SSA-able.
 // n must be an ONAME (or an ODOT sequence with an ONAME base).
-func canSSA(n *Node) bool {
+func (s *state) canSSA(n *Node) bool {
 	for n.Op == ODOT {
 		n = n.Left
 	}
@@ -2559,12 +2569,26 @@ func canSSA(n *Node) bool {
 		return false
 	}
 	switch n.Class {
-	case PEXTERN, PPARAMOUT, PPARAMREF:
+	case PEXTERN, PPARAMREF:
+		// TODO: maybe treat PPARAMREF with an Arg-like op to read from closure?
 		return false
+	case PPARAMOUT:
+		if hasdefer {
+			// TODO: handle this case?  Named return values must be
+			// in memory so that the deferred function can see them.
+			// Maybe do: if !strings.HasPrefix(n.String(), "~") { return false }
+			return false
+		}
+		if s.cgoUnsafeArgs {
+			// Cgo effectively takes the address of all result args,
+			// but the compiler can't see that.
+			return false
+		}
 	}
 	if n.Class == PPARAM && n.String() == ".this" {
 		// wrappers generated by genwrapper need to update
 		// the .this pointer in place.
+		// TODO: treat as a PPARMOUT?
 		return false
 	}
 	return canSSAType(n.Type)
@@ -2748,9 +2772,11 @@ func (s *state) insertWBmove(t *Type, left, right *ssa.Value, line int32) {
 	bEnd := s.f.NewBlock(ssa.BlockPlain)
 
 	aux := &ssa.ExternSymbol{Types[TBOOL], syslook("writeBarrier", 0).Sym}
-	flagaddr := s.newValue1A(ssa.OpAddr, Ptrto(Types[TBOOL]), aux, s.sb)
+	flagaddr := s.newValue1A(ssa.OpAddr, Ptrto(Types[TUINT32]), aux, s.sb)
 	// TODO: select the .enabled field.  It is currently first, so not needed for now.
-	flag := s.newValue2(ssa.OpLoad, Types[TBOOL], flagaddr, s.mem())
+	// Load word, test byte, avoiding partial register write from load byte.
+	flag := s.newValue2(ssa.OpLoad, Types[TUINT32], flagaddr, s.mem())
+	flag = s.newValue1(ssa.OpTrunc64to8, Types[TBOOL], flag)
 	b := s.endBlock()
 	b.Kind = ssa.BlockIf
 	b.Likely = ssa.BranchUnlikely
@@ -2791,9 +2817,11 @@ func (s *state) insertWBstore(t *Type, left, right *ssa.Value, line int32) {
 	bEnd := s.f.NewBlock(ssa.BlockPlain)
 
 	aux := &ssa.ExternSymbol{Types[TBOOL], syslook("writeBarrier", 0).Sym}
-	flagaddr := s.newValue1A(ssa.OpAddr, Ptrto(Types[TBOOL]), aux, s.sb)
+	flagaddr := s.newValue1A(ssa.OpAddr, Ptrto(Types[TUINT32]), aux, s.sb)
 	// TODO: select the .enabled field.  It is currently first, so not needed for now.
-	flag := s.newValue2(ssa.OpLoad, Types[TBOOL], flagaddr, s.mem())
+	// Load word, test byte, avoiding partial register write from load byte.
+	flag := s.newValue2(ssa.OpLoad, Types[TUINT32], flagaddr, s.mem())
+	flag = s.newValue1(ssa.OpTrunc64to8, Types[TBOOL], flag)
 	b := s.endBlock()
 	b.Kind = ssa.BlockIf
 	b.Likely = ssa.BranchUnlikely
@@ -3468,7 +3496,7 @@ func (s *state) resolveFwdRef(v *ssa.Value) {
 	v.Aux = nil
 	if b == s.f.Entry {
 		// Live variable at start of function.
-		if canSSA(name) {
+		if s.canSSA(name) {
 			v.Op = ssa.OpArg
 			v.Aux = name
 			return
@@ -3627,7 +3655,11 @@ func genssa(f *ssa.Func, ptxt *obj.Prog, gcargs, gclocals *Sym) {
 		}
 		// Emit control flow instructions for block
 		var next *ssa.Block
-		if i < len(f.Blocks)-1 {
+		if i < len(f.Blocks)-1 && (Debug['N'] == 0 || b.Kind == ssa.BlockCall) {
+			// If -N, leave next==nil so every block with successors
+			// ends in a JMP (except call blocks - plive doesn't like
+			// select{send,recv} followed by a JMP call).  Helps keep
+			// line numbers for otherwise empty blocks.
 			next = f.Blocks[i+1]
 		}
 		x := Pc
@@ -3761,7 +3793,7 @@ func (s *genState) genValue(v *ssa.Value) {
 			case ssa.OpAMD64ADDL:
 				asm = x86.ALEAL
 			case ssa.OpAMD64ADDW:
-				asm = x86.ALEAW
+				asm = x86.ALEAL
 			}
 			p := Prog(asm)
 			p.From.Type = obj.TYPE_MEM
@@ -3811,9 +3843,15 @@ func (s *genState) genValue(v *ssa.Value) {
 		opregreg(v.Op.Asm(), r, y)
 
 		if neg {
-			p := Prog(x86.ANEGQ) // TODO: use correct size?  This is mostly a hack until regalloc does 2-address correctly
-			p.To.Type = obj.TYPE_REG
-			p.To.Reg = r
+			if v.Op == ssa.OpAMD64SUBQ {
+				p := Prog(x86.ANEGQ)
+				p.To.Type = obj.TYPE_REG
+				p.To.Reg = r
+			} else { // Avoids partial registers write
+				p := Prog(x86.ANEGL)
+				p.To.Type = obj.TYPE_REG
+				p.To.Reg = r
+			}
 		}
 	case ssa.OpAMD64SUBSS, ssa.OpAMD64SUBSD, ssa.OpAMD64DIVSS, ssa.OpAMD64DIVSD:
 		r := regnum(v)
@@ -4003,7 +4041,7 @@ func (s *genState) genValue(v *ssa.Value) {
 				case ssa.OpAMD64ADDLconst:
 					asm = x86.AINCL
 				case ssa.OpAMD64ADDWconst:
-					asm = x86.AINCW
+					asm = x86.AINCL
 				}
 				p := Prog(asm)
 				p.To.Type = obj.TYPE_REG
@@ -4017,7 +4055,7 @@ func (s *genState) genValue(v *ssa.Value) {
 				case ssa.OpAMD64ADDLconst:
 					asm = x86.ADECL
 				case ssa.OpAMD64ADDWconst:
-					asm = x86.ADECW
+					asm = x86.ADECL
 				}
 				p := Prog(asm)
 				p.To.Type = obj.TYPE_REG
@@ -4039,7 +4077,7 @@ func (s *genState) genValue(v *ssa.Value) {
 		case ssa.OpAMD64ADDLconst:
 			asm = x86.ALEAL
 		case ssa.OpAMD64ADDWconst:
-			asm = x86.ALEAW
+			asm = x86.ALEAL
 		}
 		p := Prog(asm)
 		p.From.Type = obj.TYPE_MEM
@@ -4099,7 +4137,7 @@ func (s *genState) genValue(v *ssa.Value) {
 			case ssa.OpAMD64SUBLconst:
 				asm = x86.AINCL
 			case ssa.OpAMD64SUBWconst:
-				asm = x86.AINCW
+				asm = x86.AINCL
 			}
 			p := Prog(asm)
 			p.To.Type = obj.TYPE_REG
@@ -4112,7 +4150,7 @@ func (s *genState) genValue(v *ssa.Value) {
 			case ssa.OpAMD64SUBLconst:
 				asm = x86.ADECL
 			case ssa.OpAMD64SUBWconst:
-				asm = x86.ADECW
+				asm = x86.ADECL
 			}
 			p := Prog(asm)
 			p.To.Type = obj.TYPE_REG
@@ -4125,7 +4163,7 @@ func (s *genState) genValue(v *ssa.Value) {
 			case ssa.OpAMD64SUBLconst:
 				asm = x86.ALEAL
 			case ssa.OpAMD64SUBWconst:
-				asm = x86.ALEAW
+				asm = x86.ALEAL
 			}
 			p := Prog(asm)
 			p.From.Type = obj.TYPE_MEM
@@ -4398,7 +4436,7 @@ func (s *genState) genValue(v *ssa.Value) {
 		p.From.Node = n
 		p.From.Sym = Linksym(n.Sym)
 		p.From.Offset = off
-		if n.Class == PPARAM {
+		if n.Class == PPARAM || n.Class == PPARAMOUT {
 			p.From.Name = obj.NAME_PARAM
 			p.From.Offset += n.Xoffset
 		} else {
@@ -4420,7 +4458,7 @@ func (s *genState) genValue(v *ssa.Value) {
 		p.To.Node = n
 		p.To.Sym = Linksym(n.Sym)
 		p.To.Offset = off
-		if n.Class == PPARAM {
+		if n.Class == PPARAM || n.Class == PPARAMOUT {
 			p.To.Name = obj.NAME_PARAM
 			p.To.Offset += n.Xoffset
 		} else {
@@ -4564,8 +4602,8 @@ func (s *genState) genValue(v *ssa.Value) {
 		q := Prog(x86.ASETPS)
 		q.To.Type = obj.TYPE_REG
 		q.To.Reg = x86.REG_AX
-		// TODO AORQ copied from old code generator, why not AORB?
-		opregreg(x86.AORQ, regnum(v), x86.REG_AX)
+		// ORL avoids partial register write and is smaller than ORQ, used by old compiler
+		opregreg(x86.AORL, regnum(v), x86.REG_AX)
 
 	case ssa.OpAMD64SETEQF:
 		p := Prog(v.Op.Asm())
@@ -4574,8 +4612,8 @@ func (s *genState) genValue(v *ssa.Value) {
 		q := Prog(x86.ASETPC)
 		q.To.Type = obj.TYPE_REG
 		q.To.Reg = x86.REG_AX
-		// TODO AANDQ copied from old code generator, why not AANDB?
-		opregreg(x86.AANDQ, regnum(v), x86.REG_AX)
+		// ANDL avoids partial register write and is smaller than ANDQ, used by old compiler
+		opregreg(x86.AANDL, regnum(v), x86.REG_AX)
 
 	case ssa.OpAMD64InvertFlags:
 		v.Fatalf("InvertFlags should never make it to codegen %v", v)
@@ -4615,7 +4653,9 @@ func (s *genState) genValue(v *ssa.Value) {
 			case ssa.OpAMD64MOVQload, ssa.OpAMD64MOVLload, ssa.OpAMD64MOVWload, ssa.OpAMD64MOVBload,
 				ssa.OpAMD64MOVQstore, ssa.OpAMD64MOVLstore, ssa.OpAMD64MOVWstore, ssa.OpAMD64MOVBstore,
 				ssa.OpAMD64MOVBQSXload, ssa.OpAMD64MOVBQZXload, ssa.OpAMD64MOVWQSXload,
-				ssa.OpAMD64MOVWQZXload, ssa.OpAMD64MOVLQSXload, ssa.OpAMD64MOVLQZXload:
+				ssa.OpAMD64MOVWQZXload, ssa.OpAMD64MOVLQSXload, ssa.OpAMD64MOVLQZXload,
+				ssa.OpAMD64MOVSSload, ssa.OpAMD64MOVSDload, ssa.OpAMD64MOVOload,
+				ssa.OpAMD64MOVSSstore, ssa.OpAMD64MOVSDstore, ssa.OpAMD64MOVOstore:
 				if w.Args[0] == v.Args[0] && w.Aux == nil && w.AuxInt >= 0 && w.AuxInt < minZeroPage {
 					if Debug_checknil != 0 && int(v.Line) > 1 {
 						Warnl(int(v.Line), "removed nil check")
@@ -4632,6 +4672,11 @@ func (s *genState) genValue(v *ssa.Value) {
 				}
 			}
 			if w.Type.IsMemory() {
+				if w.Op == ssa.OpVarDef || w.Op == ssa.OpVarKill || w.Op == ssa.OpVarLive {
+					// these ops are OK
+					mem = w
+					continue
+				}
 				// We can't delay the nil check past the next store.
 				break
 			}
@@ -4664,7 +4709,7 @@ func (s *genState) markMoves(b *ssa.Block) {
 	}
 	for i := len(b.Values) - 1; i >= 0; i-- {
 		v := b.Values[i]
-		if flive && (v.Op == ssa.OpAMD64MOVWconst || v.Op == ssa.OpAMD64MOVLconst || v.Op == ssa.OpAMD64MOVQconst) {
+		if flive && (v.Op == ssa.OpAMD64MOVBconst || v.Op == ssa.OpAMD64MOVWconst || v.Op == ssa.OpAMD64MOVLconst || v.Op == ssa.OpAMD64MOVQconst) {
 			// The "mark" is any non-nil Aux value.
 			v.Aux = v
 		}
@@ -4980,7 +5025,15 @@ var ssaRegToReg = [...]int16{
 
 // loadByType returns the load instruction of the given type.
 func loadByType(t ssa.Type) int {
-	// For x86, there's no difference between load and store opcodes.
+	// Avoid partial register write
+	if !t.IsFloat() && t.Size() <= 2 {
+		if t.Size() == 1 {
+			return x86.AMOVBLZX
+		} else {
+			return x86.AMOVWLZX
+		}
+	}
+	// Otherwise, there's no difference between load and store opcodes.
 	return storeByType(t)
 }
 
@@ -5014,13 +5067,16 @@ func moveByType(t ssa.Type) int {
 	if t.IsFloat() {
 		// Moving the whole sse2 register is faster
 		// than moving just the correct low portion of it.
-		return x86.AMOVAPD
+		// There is no xmm->xmm move with 1 byte opcode,
+		// so use movups, which has 2 byte opcode.
+		return x86.AMOVUPS
 	} else {
 		switch t.Size() {
 		case 1:
-			return x86.AMOVB
+			// Avoids partial register write
+			return x86.AMOVL
 		case 2:
-			return x86.AMOVW
+			return x86.AMOVL
 		case 4:
 			return x86.AMOVL
 		case 8:

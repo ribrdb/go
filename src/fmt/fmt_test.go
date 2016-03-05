@@ -259,6 +259,12 @@ var fmtTests = []struct {
 	{"%+.3F", float32(-1.0), "-1.000"},
 	{"%+07.2f", 1.0, "+001.00"},
 	{"%+07.2f", -1.0, "-001.00"},
+	{"%-07.2f", 1.0, "1.00   "},
+	{"%-07.2f", -1.0, "-1.00  "},
+	{"%+-07.2f", 1.0, "+1.00  "},
+	{"%+-07.2f", -1.0, "-1.00  "},
+	{"%-+07.2f", 1.0, "+1.00  "},
+	{"%-+07.2f", -1.0, "-1.00  "},
 	{"%+10.2f", +1.0, "     +1.00"},
 	{"%+10.2f", -1.0, "     -1.00"},
 	{"% .3E", -1.0, "-1.000E+00"},
@@ -380,6 +386,9 @@ var fmtTests = []struct {
 	{"%20e", math.Inf(1), "                +Inf"},
 	{"%-20f", math.Inf(-1), "-Inf                "},
 	{"%20g", math.NaN(), "                 NaN"},
+	{"%+20f", math.NaN(), "                +NaN"},
+	{"% -20f", math.NaN(), " NaN                "},
+	{"%+-20f", math.NaN(), "+NaN                "},
 
 	// arrays
 	{"%v", array, "[1 2 3 4 5]"},
@@ -648,16 +657,26 @@ var fmtTests = []struct {
 	// Complex numbers: exhaustively tested in TestComplexFormatting.
 	{"%7.2f", 1 + 2i, "(   1.00  +2.00i)"},
 	{"%+07.2f", -1 - 2i, "(-001.00-002.00i)"},
-	// Zero padding does not apply to infinities.
+	// Zero padding does not apply to infinities and NaN.
 	{"%020f", math.Inf(-1), "                -Inf"},
 	{"%020f", math.Inf(+1), "                +Inf"},
+	{"%020f", math.NaN(), "                 NaN"},
 	{"% 020f", math.Inf(-1), "                -Inf"},
 	{"% 020f", math.Inf(+1), "                 Inf"},
+	{"% 020f", math.NaN(), "                 NaN"},
 	{"%+020f", math.Inf(-1), "                -Inf"},
 	{"%+020f", math.Inf(+1), "                +Inf"},
+	{"%+020f", math.NaN(), "                +NaN"},
+	{"%-020f", math.Inf(-1), "-Inf                "},
+	{"%-020f", math.Inf(+1), "+Inf                "},
+	{"%-020f", math.NaN(), "NaN                 "},
 	{"%20f", -1.0, "           -1.000000"},
 	// Make sure we can handle very large widths.
 	{"%0100f", -1.0, zeroFill("-", 99, "1.000000")},
+
+	// Use spaces instead of zero if padding to the right.
+	{"%0-5s", "abc", "abc  "},
+	{"%-05.1f", 1.0, "1.0  "},
 
 	// Complex fmt used to leave the plus flag set for future entries in the array
 	// causing +2+0i and +3+0i instead of 2+0i and 3+0i.
@@ -869,6 +888,14 @@ func TestReorder(t *testing.T) {
 	}
 }
 
+func BenchmarkSprintfPadding(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			Sprintf("%16f", 1.0)
+		}
+	})
+}
+
 func BenchmarkSprintfEmpty(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -913,6 +940,13 @@ func BenchmarkSprintfFloat(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			Sprintf("%g", 5.23184)
+		}
+	})
+}
+func BenchmarkSprintfBoolean(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			Sprintf("%t", true)
 		}
 	})
 }

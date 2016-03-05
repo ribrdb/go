@@ -203,6 +203,8 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 	if t0 != 0 {
 		mysg.releasetime = -1
 	}
+	// No stack splits between assigning elem and enqueuing mysg
+	// on gp.waiting where copystack can find it.
 	mysg.elem = ep
 	mysg.waitlink = nil
 	mysg.g = gp
@@ -421,7 +423,7 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 
 	if sg := c.sendq.dequeue(); sg != nil {
 		// Found a waiting sender.  If buffer is size 0, receive value
-		// directly from sender.  Otherwise, recieve from head of queue
+		// directly from sender.  Otherwise, receive from head of queue
 		// and add sender's value to the tail of the queue (both map to
 		// the same buffer slot because the queue is full).
 		recv(c, sg, ep, func() { unlock(&c.lock) })
@@ -460,6 +462,8 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 	if t0 != 0 {
 		mysg.releasetime = -1
 	}
+	// No stack splits between assigning elem and enqueuing mysg
+	// on gp.waiting where copystack can find it.
 	mysg.elem = ep
 	mysg.waitlink = nil
 	gp.waiting = mysg
