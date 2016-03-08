@@ -1563,7 +1563,7 @@ func writelines(prev *LSym) *LSym {
 	if Linkmode == LinkExternal {
 		Addaddr(Ctxt, ls, s)
 	} else {
-		addrput(s, pc)
+		addrput(ls, pc)
 	}
 
 	var pcfile Pciter

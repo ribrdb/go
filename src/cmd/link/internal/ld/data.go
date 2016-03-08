@@ -723,6 +723,7 @@ func blk(start *LSym, addr int64, size int64) {
 		if sym.Value >= eaddr {
 			break
 		}
+
 		Ctxt.Cursym = sym
 		if sym.Value < addr {
 			Diag("phase error: addr=%#x but sym=%#x type=%d", int64(addr), int64(sym.Value), sym.Type)
