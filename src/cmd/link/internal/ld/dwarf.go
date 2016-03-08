@@ -1360,6 +1360,7 @@ func defdwsymb(sym *LSym, s string, t int, v int64, size int64, ver int, gotype 
 
 	case 'd', 'b', 'D', 'B':
 		dv = newdie(&dwglobals, DW_ABRV_VARIABLE, s)
+		dv.sym = Linklookup(Ctxt, infoprefix+s, 0)
 		newabslocexprattr(dv, v, sym)
 		if ver == 0 {
 			newattr(dv, DW_AT_external, DW_CLS_FLAG, 1, 0)
@@ -1904,9 +1905,10 @@ func writepub(sname string, ispub func(*DWDie) bool, prev *LSym) *LSym {
 			if !ispub(die) {
 				continue
 			}
-			Addaddr(Ctxt, s, die.sym)
 			dwa := getattr(die, DW_AT_name)
-			Addstring(s, dwa.data.(string))
+			name := dwa.data.(string)
+			Addaddr(Ctxt, s, die.sym)
+			Addstring(s, name)
 		}
 
 		Adduint32(Ctxt, s, 0)

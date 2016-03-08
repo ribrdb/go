@@ -118,6 +118,9 @@ func setuint32(ctxt *Link, s *LSym, r int64, v uint32) int64 {
 }
 
 func Addaddrplus(ctxt *Link, s *LSym, t *LSym, add int64) int64 {
+	if t == nil {
+		panic(t.Name)
+	}
 	if s.Type == 0 {
 		s.Type = obj.SDATA
 	}
@@ -617,6 +620,9 @@ func reloc() {
 	for s := datap; s != nil; s = s.Next {
 		relocsym(s)
 	}
+	for s := dwarfp; s != nil; s = s.Next {
+		relocsym(s)
+	}
 }
 
 func dynrelocsym(s *LSym) {
@@ -756,6 +762,7 @@ func Codeblk(addr int64, size int64) {
 	if Debug['a'] != 0 {
 		fmt.Fprintf(&Bso, "codeblk [%#x,%#x) at offset %#x\n", addr, addr+size, Cpos())
 	}
+	Bso.Flush()
 
 	blk(Ctxt.Textp, addr, size)
 
@@ -897,6 +904,14 @@ func Datblk(addr int64, size int64) {
 		fmt.Fprintf(&Bso, "\t%.8x| 00 ...\n", uint(addr))
 	}
 	fmt.Fprintf(&Bso, "\t%.8x|\n", uint(eaddr))
+}
+
+func Dwarfblk(addr int64, size int64) {
+	if Debug['a'] != 0 {
+		fmt.Fprintf(&Bso, "dwarfblk [%#x,%#x) at offset %#x\n", addr, addr+size, Cpos())
+	}
+
+	blk(dwarfp, addr, size)
 }
 
 func strnput(s string, n int) {
@@ -1600,6 +1615,38 @@ func dodata() {
 		Diag("read-only data segment too large")
 	}
 
+	Dwarfemitdebugsections()
+
+	for s = dwarfp; s != nil && s.Type == obj.SDWARFSECT; s = s.Next {
+		sect = addsection(&Segdwarf, s.Name, 04)
+		sect.Align = symalign(s)
+		sect.Align = symalign(s)
+		datsize = Rnd(datsize, int64(sect.Align))
+		sect.Vaddr = uint64(datsize)
+		s.Sect = sect
+		s.Type = obj.SRODATA
+		s.Value = int64(uint64(datsize) - sect.Vaddr)
+		growdatsize(&datsize, s)
+		sect.Length = uint64(datsize) - sect.Vaddr
+	}
+
+	sect = addsection(&Segdwarf, ".debug_info", 04)
+	sect.Align = maxalign(s, obj.SDWARFINFO)
+	datsize = Rnd(datsize, int64(sect.Align))
+	sect.Vaddr = uint64(datsize)
+	for ; s != nil && s.Type == obj.SDWARFINFO; s = s.Next {
+		datsize = aligndatsize(datsize, s)
+		s.Sect = sect
+		s.Type = obj.SRODATA
+		s.Value = int64(uint64(datsize) - sect.Vaddr)
+		growdatsize(&datsize, s)
+	}
+
+	// 6g uses 4-byte relocation offsets, so the entire segment must fit in 32 bits.
+	if datsize != int64(uint32(datsize)) {
+		Diag("dwarf segment too large")
+	}
+
 	/* number the sections */
 	n := int32(1)
 
@@ -1612,6 +1659,10 @@ func dodata() {
 		n++
 	}
 	for sect := Segdata.Sect; sect != nil; sect = sect.Next {
+		sect.Extnum = int16(n)
+		n++
+	}
+	for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
 		sect.Extnum = int16(n)
 		n++
 	}
@@ -1762,6 +1813,29 @@ func address() {
 	}
 
 	Segdata.Filelen = bss.Vaddr - Segdata.Vaddr
+
+	va = uint64(Rnd(int64(va), int64(INITRND)))
+	Segdwarf.Rwx = 06
+	Segdwarf.Vaddr = va
+	Segdwarf.Fileoff = va - Segdata.Vaddr + Segdata.Fileoff
+	Segdwarf.Filelen = 0
+	if HEADTYPE == obj.Hwindows {
+		Segdwarf.Fileoff = Segdata.Fileoff + uint64(Rnd(int64(Segdata.Length), PEFILEALIGN))
+	}
+	if HEADTYPE == obj.Hplan9 {
+		Segdwarf.Fileoff = Segdata.Fileoff + Segdata.Filelen
+	}
+	for s := Segdwarf.Sect; s != nil; s = s.Next {
+		vlen = int64(s.Length)
+		if s.Next != nil {
+			vlen = int64(s.Next.Vaddr - s.Vaddr)
+		}
+		s.Vaddr = va
+		va += uint64(vlen)
+		Segdwarf.Length = va - Segdwarf.Vaddr
+	}
+
+	Segdwarf.Filelen = va - Segdwarf.Vaddr
 
 	text := Segtext.Sect
 	var rodata *Section

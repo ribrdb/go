@@ -388,6 +388,8 @@ const (
 	SCONST
 	SDYNIMPORT
 	SHOSTOBJ
+	SDWARFSECT
+	SDWARFINFO
 	SSUB       = 1 << 8
 	SMASK      = SSUB - 1
 	SHIDDEN    = 1 << 9

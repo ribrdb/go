@@ -866,6 +866,9 @@ func asmb() {
 	ld.Cseek(int64(ld.Segdata.Fileoff))
 	ld.Datblk(int64(ld.Segdata.Vaddr), int64(ld.Segdata.Filelen))
 
+	ld.Cseek(int64(ld.Segdwarf.Fileoff))
+	ld.Datblk(int64(ld.Segdwarf.Vaddr), int64(ld.Segdwarf.Filelen))
+
 	/* output symbol table */
 	ld.Symsize = 0
 
@@ -880,12 +883,12 @@ func asmb() {
 		switch ld.HEADTYPE {
 		default:
 			if ld.Iself {
-				symo = uint32(ld.Segdata.Fileoff + ld.Segdata.Filelen)
+				symo = uint32(ld.Segdwarf.Fileoff + ld.Segdwarf.Filelen)
 				symo = uint32(ld.Rnd(int64(symo), int64(ld.INITRND)))
 			}
 
 		case obj.Hplan9:
-			symo = uint32(ld.Segdata.Fileoff + ld.Segdata.Filelen)
+			symo = uint32(ld.Segdwarf.Fileoff + ld.Segdwarf.Filelen)
 		}
 
 		ld.Cseek(int64(symo))
@@ -898,11 +901,6 @@ func asmb() {
 				ld.Asmelfsym()
 				ld.Cflush()
 				ld.Cwrite(ld.Elfstrdat)
-
-				if ld.Debug['v'] != 0 {
-					fmt.Fprintf(&ld.Bso, "%5.2f dwarf\n", obj.Cputime())
-				}
-				ld.Dwarfemitdebugsections()
 
 				if ld.Linkmode == ld.LinkExternal {
 					ld.Elfemitreloc()
