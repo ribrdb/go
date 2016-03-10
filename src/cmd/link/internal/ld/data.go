@@ -117,10 +117,12 @@ func setuint32(ctxt *Link, s *LSym, r int64, v uint32) int64 {
 	return setuintxx(ctxt, s, r, uint64(v), 4)
 }
 
+func setuint64(ctxt *Link, s *LSym, r int64, v uint64) int64 {
+	return setuintxx(ctxt, s, r, v, 4)
+}
+
 func Addaddrplus(ctxt *Link, s *LSym, t *LSym, add int64) int64 {
-	if t == nil {
-		panic(t.Name)
-	}
+	_ = t.Name
 	if s.Type == 0 {
 		s.Type = obj.SDATA
 	}
@@ -159,6 +161,7 @@ func Addaddr(ctxt *Link, s *LSym, t *LSym) int64 {
 }
 
 func setaddrplus(ctxt *Link, s *LSym, off int64, t *LSym, add int64) int64 {
+	_ = t.Name
 	if s.Type == 0 {
 		s.Type = obj.SDATA
 	}
@@ -198,6 +201,7 @@ func addsize(ctxt *Link, s *LSym, t *LSym) int64 {
 }
 
 func addaddrplus4(ctxt *Link, s *LSym, t *LSym, add int64) int64 {
+	_ = t.Name
 	if s.Type == 0 {
 		s.Type = obj.SDATA
 	}
@@ -494,6 +498,22 @@ func relocsym(s *LSym) {
 				Diag("non-pc-relative relocation address is too big: %#x (%#x + %#x)", uint64(o), Symaddr(r.Sym), r.Add)
 				errorexit()
 			}
+
+		case obj.R_DWARFREF:
+			if Linkmode == LinkExternal {
+				r.Done = 0
+				r.Type = obj.R_ADDR
+
+				r.Xsym = r.Sym
+				r.Xadd = r.Add + Symaddr(r.Sym) - int64(r.Sym.Sect.Vaddr)
+				o = r.Xadd
+				rs = r.Xsym
+				if Iself && Thearch.Thechar == '6' {
+					o = 0
+				}
+				break
+			}
+			o = Symaddr(r.Sym) + r.Add - int64(r.Sym.Sect.Vaddr)
 
 			// r->sym can be null when CALL $(constant) is transformed from absolute PC to relative PC call.
 		case obj.R_CALL, obj.R_GOTPCREL, obj.R_PCREL:
@@ -1616,12 +1636,11 @@ func dodata() {
 		Diag("read-only data segment too large")
 	}
 
-	Dwarfemitdebugsections()
+	dwarfgeneratedebugsyms()
 
 	for s = dwarfp; s != nil && s.Type == obj.SDWARFSECT; s = s.Next {
 		sect = addsection(&Segdwarf, s.Name, 04)
-		sect.Align = symalign(s)
-		sect.Align = symalign(s)
+		sect.Align = 1
 		datsize = Rnd(datsize, int64(sect.Align))
 		sect.Vaddr = uint64(datsize)
 		s.Sect = sect
@@ -1632,16 +1651,16 @@ func dodata() {
 	}
 
 	sect = addsection(&Segdwarf, ".debug_info", 04)
-	sect.Align = maxalign(s, obj.SDWARFINFO)
+	sect.Align = 1
 	datsize = Rnd(datsize, int64(sect.Align))
 	sect.Vaddr = uint64(datsize)
 	for ; s != nil && s.Type == obj.SDWARFINFO; s = s.Next {
-		datsize = aligndatsize(datsize, s)
 		s.Sect = sect
 		s.Type = obj.SRODATA
 		s.Value = int64(uint64(datsize) - sect.Vaddr)
 		growdatsize(&datsize, s)
 	}
+	sect.Length = uint64(datsize) - sect.Vaddr
 
 	// 6g uses 4-byte relocation offsets, so the entire segment must fit in 32 bits.
 	if datsize != int64(uint32(datsize)) {
@@ -1818,13 +1837,10 @@ func address() {
 	va = uint64(Rnd(int64(va), int64(INITRND)))
 	Segdwarf.Rwx = 06
 	Segdwarf.Vaddr = va
-	Segdwarf.Fileoff = va - Segdata.Vaddr + Segdata.Fileoff
+	Segdwarf.Fileoff = Segdata.Fileoff + uint64(Rnd(int64(Segdata.Filelen), int64(INITRND)))
 	Segdwarf.Filelen = 0
 	if HEADTYPE == obj.Hwindows {
-		Segdwarf.Fileoff = Segdata.Fileoff + uint64(Rnd(int64(Segdata.Length), PEFILEALIGN))
-	}
-	if HEADTYPE == obj.Hplan9 {
-		Segdwarf.Fileoff = Segdata.Fileoff + Segdata.Filelen
+		Segdwarf.Fileoff = Segdata.Fileoff + uint64(Rnd(int64(Segdata.Filelen), PEFILEALIGN))
 	}
 	for s := Segdwarf.Sect; s != nil; s = s.Next {
 		vlen = int64(s.Length)
@@ -1856,6 +1872,15 @@ func address() {
 
 	var sub *LSym
 	for sym := datap; sym != nil; sym = sym.Next {
+		Ctxt.Cursym = sym
+		if sym.Sect != nil {
+			sym.Value += int64(sym.Sect.Vaddr)
+		}
+		for sub = sym.Sub; sub != nil; sub = sub.Sub {
+			sub.Value += sym.Value
+		}
+	}
+	for sym := dwarfp; sym != nil; sym = sym.Next {
 		Ctxt.Cursym = sym
 		if sym.Sect != nil {
 			sym.Value += int64(sym.Sect.Vaddr)

@@ -410,6 +410,10 @@ func machoshbits(mseg *MachoSeg, sect *Section, segname string) {
 		msect.name = "__mod_init_func"
 		msect.flag = 9 // S_MOD_INIT_FUNC_POINTERS
 	}
+
+	if segname == "__DWARF" {
+		msect.flag |= 0x02000000
+	}
 }
 
 func Asmbmacho() {
@@ -489,6 +493,20 @@ func Asmbmacho() {
 
 	for sect := Segdata.Sect; sect != nil; sect = sect.Next {
 		machoshbits(ms, sect, "__DATA")
+	}
+
+	/* dwarf */
+	if Debug['w'] == 0 {
+		if Linkmode != LinkExternal {
+			ms = newMachoSeg("__DWARF", 20)
+			ms.vaddr = Segdwarf.Vaddr
+			ms.vsize = 0
+			ms.fileoffset = Segdwarf.Fileoff
+			ms.filesize = Segdwarf.Filelen
+		}
+		for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
+			machoshbits(ms, sect, "__DWARF")
+		}
 	}
 
 	if Linkmode != LinkExternal {
@@ -583,11 +601,6 @@ func Asmbmacho() {
 		ml := newMachoLoad(LC_VERSION_MIN_MACOSX, 2)
 		ml.data[0] = 10<<16 | 7<<8 | 0<<0 // OS X version 10.7.0
 		ml.data[1] = 10<<16 | 7<<8 | 0<<0 // SDK 10.7.0
-	}
-
-	// TODO: dwarf headers go in ms too
-	if Debug['s'] == 0 {
-		dwarfaddmachoheaders(ms)
 	}
 
 	a := machowrite()
@@ -875,5 +888,7 @@ func Machoemitreloc() {
 	for sect := Segdata.Sect; sect != nil; sect = sect.Next {
 		machorelocsect(sect, datap)
 	}
-	dwarfemitreloc()
+	for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
+		machorelocsect(sect, dwarfp)
+	}
 }

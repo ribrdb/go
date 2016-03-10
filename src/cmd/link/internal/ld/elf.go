@@ -1687,6 +1687,9 @@ func Elfemitreloc() {
 	for sect := Segdata.Sect; sect != nil; sect = sect.Next {
 		elfrelocsect(sect, datap)
 	}
+	for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
+		elfrelocsect(sect, datap)
+	}
 }
 
 func addgonote(sectionName string, tag uint32, desc []byte) {
@@ -1823,7 +1826,6 @@ func doelf() {
 	if Debug['s'] == 0 {
 		Addstring(shstrtab, ".symtab")
 		Addstring(shstrtab, ".strtab")
-		dwarfaddshstrings(shstrtab)
 	}
 
 	Addstring(shstrtab, ".shstrtab")
@@ -2048,6 +2050,9 @@ func Asmbelfsetup() {
 		elfshalloc(sect)
 	}
 	for sect := Segdata.Sect; sect != nil; sect = sect.Next {
+		elfshalloc(sect)
+	}
+	for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
 		elfshalloc(sect)
 	}
 }
@@ -2413,6 +2418,9 @@ elfobj:
 	for sect := Segdata.Sect; sect != nil; sect = sect.Next {
 		elfshbits(sect)
 	}
+	for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
+		elfshbits(sect)
+	}
 
 	if Linkmode == LinkExternal {
 		for sect := Segtext.Sect; sect != nil; sect = sect.Next {
@@ -2424,7 +2432,9 @@ elfobj:
 		for sect := Segdata.Sect; sect != nil; sect = sect.Next {
 			elfshreloc(sect)
 		}
-
+		for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
+			elfshreloc(sect)
+		}
 		// add a .note.GNU-stack section to mark the stack as non-executable
 		sh := elfshname(".note.GNU-stack")
 
@@ -2448,8 +2458,6 @@ elfobj:
 		sh.off = uint64(symo) + uint64(Symsize)
 		sh.size = uint64(len(Elfstrdat))
 		sh.addralign = 1
-
-		dwarfaddelfheaders()
 	}
 
 	/* Main header */

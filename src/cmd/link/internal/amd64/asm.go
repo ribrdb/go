@@ -651,7 +651,7 @@ func asmb() {
 	ld.Datblk(int64(ld.Segdata.Vaddr), int64(ld.Segdata.Filelen))
 
 	ld.Cseek(int64(ld.Segdwarf.Fileoff))
-	ld.Datblk(int64(ld.Segdwarf.Vaddr), int64(ld.Segdwarf.Filelen))
+	ld.Dwarfblk(int64(ld.Segdwarf.Vaddr), int64(ld.Segdwarf.Filelen))
 
 	machlink := int64(0)
 	if ld.HEADTYPE == obj.Hdarwin {
