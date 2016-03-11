@@ -17,6 +17,7 @@ package ld
 import (
 	"cmd/internal/obj"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 )
@@ -629,6 +630,7 @@ func adddwarfref(ctxt *Link, s *LSym, t *LSym, size int) int64 {
 }
 
 func setdwarfref(ctxt *Link, s *LSym, off int64, t *LSym, size int) int64 {
+	_ = t.Name
 	r := Addrel(s)
 	r.Sym = t
 	r.Off = int32(off)
@@ -794,6 +796,10 @@ func putdie(prev *LSym, die *DWDie) *LSym {
 	if s == nil {
 		s = prev
 	} else {
+		if s.Onlist != 0 {
+			log.Fatalf("symbol %s listed multiple times", s.Name)
+		}
+		s.Onlist = 1
 		prev.Next = s
 	}
 	uleb128put(s, int64(die.abbrev))
@@ -906,10 +912,6 @@ func defgotype(gotype *LSym) *LSym {
 }
 
 func newtype(gotype *LSym) *DWDie {
-	if false && Debug['v'] > 2 {
-		fmt.Printf("new type: %v\n", gotype)
-	}
-
 	name := gotype.Name[5:] // could also decode from Type.string
 	kind := decodetype_kind(gotype)
 	bytesize := decodetype_size(gotype)
@@ -1190,6 +1192,18 @@ const (
 	BucketSize = 8
 )
 
+func mkinternaltype(abbrev int, typename, keyname, valname string, f func(*DWDie)) *LSym {
+	name := mkinternaltypename(typename, keyname, valname)
+	symname := infoprefix + name
+	s := Linkrlookup(Ctxt, symname, 0)
+	if s != nil {
+		return s
+	}
+	die := newdie(&dwtypes, abbrev, name)
+	f(die)
+	return die.sym
+}
+
 func synthesizemaptypes(die *DWDie) {
 	hash := walktypedef(findprotodie("type.runtime.hmap"))
 	bucket := walktypedef(findprotodie("type.runtime.bmap"))
@@ -1221,66 +1235,66 @@ func synthesizemaptypes(die *DWDie) {
 
 		// Construct type to represent an array of BucketSize keys
 		keyname := name_from_die_sym(keytype)
-		dwhk := newdie(&dwtypes, DW_ABRV_ARRAYTYPE, mkinternaltypename("[]key", keyname, ""))
-
-		newattr(dwhk, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*int64(keysize), 0)
-		t := keytype
-		if indirect_key {
-			t = defptrto(keytype)
-		}
-		newrefattr(dwhk, DW_AT_type, t)
-		fld := newdie(dwhk, DW_ABRV_ARRAYRANGE, "size")
-		newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
-		newrefattr(fld, DW_AT_type, mustFind("uintptr"))
+		dwhks := mkinternaltype(DW_ABRV_ARRAYTYPE, "[]key", keyname, "", func(dwhk *DWDie) {
+			newattr(dwhk, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*int64(keysize), 0)
+			t := keytype
+			if indirect_key {
+				t = defptrto(keytype)
+			}
+			newrefattr(dwhk, DW_AT_type, t)
+			fld := newdie(dwhk, DW_ABRV_ARRAYRANGE, "size")
+			newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
+			newrefattr(fld, DW_AT_type, mustFind("uintptr"))
+		})
 
 		// Construct type to represent an array of BucketSize values
 		valname := name_from_die_sym(valtype)
-		dwhv := newdie(&dwtypes, DW_ABRV_ARRAYTYPE, mkinternaltypename("[]val", valname, ""))
-
-		newattr(dwhv, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*int64(valsize), 0)
-		t = valtype
-		if indirect_val {
-			t = defptrto(valtype)
-		}
-		newrefattr(dwhv, DW_AT_type, t)
-		fld = newdie(dwhv, DW_ABRV_ARRAYRANGE, "size")
-		newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
-		newrefattr(fld, DW_AT_type, mustFind("uintptr"))
+		dwhvs := mkinternaltype(DW_ABRV_ARRAYTYPE, "[]val", valname, "", func(dwhv *DWDie) {
+			newattr(dwhv, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*int64(valsize), 0)
+			t := valtype
+			if indirect_val {
+				t = defptrto(valtype)
+			}
+			newrefattr(dwhv, DW_AT_type, t)
+			fld := newdie(dwhv, DW_ABRV_ARRAYRANGE, "size")
+			newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
+			newrefattr(fld, DW_AT_type, mustFind("uintptr"))
+		})
 
 		// Construct bucket<K,V>
-		dwhb := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("bucket", keyname, valname))
+		dwhbs := mkinternaltype(DW_ABRV_STRUCTTYPE, "bucket", keyname, valname, func(dwhb *DWDie) {
+			// Copy over all fields except the field "data" from the generic
+			// bucket. "data" will be replaced with keys/values below.
+			copychildrenexcept(dwhb, bucket, findchild(bucket, "data"))
 
-		// Copy over all fields except the field "data" from the generic bucket.
-		// "data" will be replaced with keys/values below.
-		copychildrenexcept(dwhb, bucket, findchild(bucket, "data"))
+			fld := newdie(dwhb, DW_ABRV_STRUCTFIELD, "keys")
+			newrefattr(fld, DW_AT_type, dwhks)
+			newmemberoffsetattr(fld, BucketSize)
+			fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "values")
+			newrefattr(fld, DW_AT_type, dwhvs)
+			newmemberoffsetattr(fld, BucketSize+BucketSize*int32(keysize))
+			fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "overflow")
+			newrefattr(fld, DW_AT_type, defptrto(dwhb.sym))
+			newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize)))
+			if Thearch.Regsize > Thearch.Ptrsize {
+				fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "pad")
+				newrefattr(fld, DW_AT_type, mustFind("uintptr"))
+				newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize))+int32(Thearch.Ptrsize))
+			}
 
-		fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "keys")
-		newrefattr(fld, DW_AT_type, dwhk.sym)
-		newmemberoffsetattr(fld, BucketSize)
-		fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "values")
-		newrefattr(fld, DW_AT_type, dwhv.sym)
-		newmemberoffsetattr(fld, BucketSize+BucketSize*int32(keysize))
-		fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "overflow")
-		newrefattr(fld, DW_AT_type, defptrto(dwhb.sym))
-		newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize)))
-		if Thearch.Regsize > Thearch.Ptrsize {
-			fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "pad")
-			newrefattr(fld, DW_AT_type, mustFind("uintptr"))
-			newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize))+int32(Thearch.Ptrsize))
-		}
-
-		newattr(dwhb, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize+BucketSize*int64(keysize)+BucketSize*int64(valsize)+int64(Thearch.Regsize), 0)
+			newattr(dwhb, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize+BucketSize*int64(keysize)+BucketSize*int64(valsize)+int64(Thearch.Regsize), 0)
+		})
 
 		// Construct hash<K,V>
-		dwh := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("hash", keyname, valname))
-
-		copychildren(dwh, hash)
-		substitutetype(dwh, "buckets", defptrto(dwhb.sym))
-		substitutetype(dwh, "oldbuckets", defptrto(dwhb.sym))
-		newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hash, DW_AT_byte_size).value, nil)
+		dwhs := mkinternaltype(DW_ABRV_STRUCTTYPE, "hash", keyname, valname, func(dwh *DWDie) {
+			copychildren(dwh, hash)
+			substitutetype(dwh, "buckets", defptrto(dwhbs))
+			substitutetype(dwh, "oldbuckets", defptrto(dwhbs))
+			newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hash, DW_AT_byte_size).value, nil)
+		})
 
 		// make map type a pointer to hash<K,V>
-		newrefattr(die, DW_AT_type, defptrto(dwh.sym))
+		newrefattr(die, DW_AT_type, defptrto(dwhs))
 	}
 }
 
@@ -1304,34 +1318,35 @@ func synthesizechantypes(die *DWDie) {
 		elemtype := defgotype(elemgotype)
 
 		// sudog<T>
-		dws := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("sudog", elemname, ""))
-
-		copychildren(dws, sudog)
-		substitutetype(dws, "elem", elemtype)
-		if elemsize > 8 {
-			elemsize -= 8
-		} else {
-			elemsize = 0
-		}
-		newattr(dws, DW_AT_byte_size, DW_CLS_CONSTANT, int64(sudogsize)+int64(elemsize), nil)
+		dwss := mkinternaltype(DW_ABRV_STRUCTTYPE, "sudog", elemname, "", func(dws *DWDie) {
+			copychildren(dws, sudog)
+			substitutetype(dws, "elem", elemtype)
+			if elemsize > 8 {
+				elemsize -= 8
+			} else {
+				elemsize = 0
+			}
+			newattr(dws, DW_AT_byte_size, DW_CLS_CONSTANT, int64(sudogsize)+int64(elemsize), nil)
+		})
 
 		// waitq<T>
-		dww := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("waitq", elemname, ""))
+		mkinternaltype(DW_ABRV_STRUCTTYPE, "waitq", elemname, "", func(dww *DWDie) {
 
-		copychildren(dww, waitq)
-		substitutetype(dww, "first", defptrto(dws.sym))
-		substitutetype(dww, "last", defptrto(dws.sym))
-		newattr(dww, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(waitq, DW_AT_byte_size).value, nil)
+			copychildren(dww, waitq)
+			substitutetype(dww, "first", defptrto(dwss))
+			substitutetype(dww, "last", defptrto(dwss))
+			newattr(dww, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(waitq, DW_AT_byte_size).value, nil)
+		})
 
 		// hchan<T>
-		dwh := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("hchan", elemname, ""))
+		dwhs := mkinternaltype(DW_ABRV_STRUCTTYPE, "hchan", elemname, "", func(dwh *DWDie) {
+			copychildren(dwh, hchan)
+			substitutetype(dwh, "recvq", dwss)
+			substitutetype(dwh, "sendq", dwss)
+			newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hchan, DW_AT_byte_size).value, nil)
+		})
 
-		copychildren(dwh, hchan)
-		substitutetype(dwh, "recvq", dww.sym)
-		substitutetype(dwh, "sendq", dww.sym)
-		newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hchan, DW_AT_byte_size).value, nil)
-
-		newrefattr(die, DW_AT_type, defptrto(dwh.sym))
+		newrefattr(die, DW_AT_type, defptrto(dwhs))
 	}
 }
 
@@ -2066,6 +2081,38 @@ func dwarfgeneratedebugsyms() {
 	last = writearanges(last)
 	last = writegdbscript(last)
 	last.Next = infosyms
+}
+
+/*
+ *  Elf.
+ */
+func dwarfaddshstrings(shstrtab *LSym) {
+	if Debug['w'] != 0 { // disable dwarf
+		return
+	}
+
+	Addstring(shstrtab, ".debug_abbrev")
+	Addstring(shstrtab, ".debug_aranges")
+	Addstring(shstrtab, ".debug_frame")
+	Addstring(shstrtab, ".debug_info")
+	Addstring(shstrtab, ".debug_line")
+	Addstring(shstrtab, ".debug_pubnames")
+	Addstring(shstrtab, ".debug_pubtypes")
+	Addstring(shstrtab, ".debug_gdb_scripts")
+	if Linkmode == LinkExternal {
+		switch Thearch.Thechar {
+		case '0', '6', '7', '9':
+			Addstring(shstrtab, ".rela.debug_info")
+			Addstring(shstrtab, ".rela.debug_aranges")
+			Addstring(shstrtab, ".rela.debug_line")
+			Addstring(shstrtab, ".rela.debug_frame")
+		default:
+			Addstring(shstrtab, ".rel.debug_info")
+			Addstring(shstrtab, ".rel.debug_aranges")
+			Addstring(shstrtab, ".rel.debug_line")
+			Addstring(shstrtab, ".rel.debug_frame")
+		}
+	}
 }
 
 /*

@@ -140,6 +140,7 @@ func Addaddrplus(ctxt *Link, s *LSym, t *LSym, add int64) int64 {
 }
 
 func Addpcrelplus(ctxt *Link, s *LSym, t *LSym, add int64) int64 {
+	_ = t.Name
 	if s.Type == 0 {
 		s.Type = obj.SDATA
 	}
@@ -500,6 +501,9 @@ func relocsym(s *LSym) {
 			}
 
 		case obj.R_DWARFREF:
+			if r.Sym.Sect == nil {
+				Diag("missing section: %s from %s", r.Sym.Name, s.Name)
+			}
 			if Linkmode == LinkExternal {
 				r.Done = 0
 				r.Type = obj.R_ADDR

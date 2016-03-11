@@ -1826,6 +1826,7 @@ func doelf() {
 	if Debug['s'] == 0 {
 		Addstring(shstrtab, ".symtab")
 		Addstring(shstrtab, ".strtab")
+		dwarfaddshstrings(shstrtab)
 	}
 
 	Addstring(shstrtab, ".shstrtab")
